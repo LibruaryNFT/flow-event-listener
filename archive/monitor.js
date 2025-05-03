@@ -41,9 +41,12 @@ const contracts = {
   },
   TSHOT_EXCHANGE: {
     address: "A.05b67ba314000b2d.TSHOTExchange",
-    events: ["swapNFTsForTSHOT", "commitSwap", "swapTSHOTForNFTs"],
+    events: [
+      "NFTToTSHOTSwapCompleted",
+      "TSHOTToNFTSwapInitiated",
+      "TSHOTToNFTSwapCompleted",
+    ],
   },
-  // Add other contracts back here if you monitor them
 };
 
 // Generate event types
