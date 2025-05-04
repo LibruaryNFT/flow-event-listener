@@ -1,60 +1,37 @@
-// monitor.js  ────────────────────────────────────────────────────────────
-// Flow event monitor with auto catch-up mode
-//
-// • Built on your monitor_final_optimized.js foundation
-// • Adds dynamic tuning so a week-long gap is processed rapidly
-// • No other deployment-time changes are required
-//
-// ────────────────────────────────────────────────────────────────────────
+// monitor.js  ––– Flow event monitor (TSHOT removed, slower polling)
 
-// ── Imports & env ───────────────────────────────────────────────────────
+/* eslint-disable no-console */
 const fcl = require("@onflow/fcl");
 const { MongoClient } = require("mongodb");
 require("dotenv").config();
-// p-limit is imported dynamically below
 
 const FLOW_ACCESS_NODE = process.env.FLOW_ACCESS_NODE;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DATABASE_NAME = "flow_events";
 const RAW_EVENTS_COLLECTION = "raw_events";
 const PROCESSED_BLOCKS_COLLECTION = "processed_blocks";
-const projectId = process.env.PROJECT_ID || "flow_monitors"; // keep stable
+const projectId = process.env.PROJECT_ID || "flow_monitors";
 
-// ── Tuning profiles ────────────────────────────────────────────────────
-// These two objects hold *all* tunables.  The script switches between them
-// depending on how far behind the head block it is.
+// ── Tuning profiles ────────────────────────────────────────────────
 const LIVE = {
   TX_FETCH_CONCURRENCY: 8,
   BLOCK_POLL_RANGE: 25,
-  POLLING_DELAY: 500, // ms
-  CAUGHT_UP_POLL_DELAY: 5000, // ms when fully caught up
+  POLLING_DELAY: 2000, // 2 s
+  CAUGHT_UP_POLL_DELAY: 10000, // 10 s idle wait
 };
 
 const CATCH_UP = {
   TX_FETCH_CONCURRENCY: 32,
-  BLOCK_POLL_RANGE: 250, // Flow RPC maximum
-  POLLING_DELAY: 0, // hammer until near head
+  BLOCK_POLL_RANGE: 250,
+  POLLING_DELAY: 0,
   CAUGHT_UP_POLL_DELAY: 2000,
 };
+const BEHIND_THRESHOLD = 10_000; // ≈2 h
 
-// How far behind before we enter catch-up
-const BEHIND_THRESHOLD = 10_000; // blocks ≈ 2 h on mainnet
-
-// Active parameter set (starts in LIVE; may switch to CATCH_UP)
 let params = { ...LIVE };
 
-// ── Contract map (updated event names) ─────────────────────────────────
+// ── Contract map (TSHOT removed) ───────────────────────────────────
 const contracts = {
-  TSHOT: {
-    address: "A.05b67ba314000b2d.TSHOT",
-    events: [
-      "TokensInitialized",
-      "TokensWithdrawn",
-      "TokensDeposited",
-      "TokensMinted",
-      "TokensBurned",
-    ],
-  },
   TSHOT_EXCHANGE: {
     address: "A.05b67ba314000b2d.TSHOTExchange",
     events: [
@@ -64,7 +41,6 @@ const contracts = {
     ],
   },
   TSHOT_FLOW_PAIR: {
-    // fully-qualified contract identifier
     address: "A.5eaa6c0b37002bbd.SwapPair",
     events: [
       "TokensInitialized",
@@ -78,38 +54,21 @@ const contracts = {
   },
 };
 
-function generateEventTypes() {
-  const set = new Set();
-  for (const cfg of Object.values(contracts)) {
-    if (cfg.address && Array.isArray(cfg.events)) {
-      cfg.events.forEach((ev) => set.add(`${cfg.address}.${ev}`));
-    }
-  }
-  if (!set.size) {
-    console.error("FATAL: no valid contracts configured");
-    process.exit(1);
-  }
-  return [...set];
-}
-const eventTypes = generateEventTypes();
+const eventTypes = Object.values(contracts).flatMap((c) =>
+  c.events.map((ev) => `${c.address}.${ev}`)
+);
 
-// ── Globals for Mongo handles ──────────────────────────────────────────
-let mongoClient = null;
-let eventsCollection = null;
-let processedBlocksCol = null;
-
-// ── Mongo connection helper ────────────────────────────────────────────
+// ── Mongo handles ─────────────────────────────────────────────────
+let mongoClient, eventsCollection, processedBlocksCol;
 async function connectToMongo() {
   if (!mongoClient) mongoClient = new MongoClient(MONGODB_URI);
   if (!mongoClient.topology || !mongoClient.topology.isConnected()) {
-    console.log("Connecting/Reconnecting MongoDB Client...");
+    console.log("Connecting MongoDB …");
     await mongoClient.connect();
   }
   const db = mongoClient.db(DATABASE_NAME);
   eventsCollection = db.collection(RAW_EVENTS_COLLECTION);
   processedBlocksCol = db.collection(PROCESSED_BLOCKS_COLLECTION);
-
-  // indices (noop if already exist)
   await Promise.all([
     eventsCollection.createIndex({ projectId: 1, blockHeight: -1 }),
     eventsCollection.createIndex({ transactionId: 1 }),
@@ -118,186 +77,124 @@ async function connectToMongo() {
   ]);
 }
 
-// ── Flow helpers ───────────────────────────────────────────────────────
-const getLatestSealedBlockHeight = async () =>
+// ── Flow helpers ──────────────────────────────────────────────────
+const headBlock = () =>
   fcl
     .send([fcl.getBlock(true)])
     .then(fcl.decode)
     .then((b) => b.height);
 
-async function getLatestProcessedBlockHeight() {
-  const doc = await processedBlocksCol.findOne({ projectId });
-  return doc?.blockHeight ?? 0;
-}
+const lastProcessed = () =>
+  processedBlocksCol.findOne({ projectId }).then((d) => d?.blockHeight ?? 0);
 
-// storeEvent unchanged from your version (trimmed for brevity)
-async function storeEvent(event, tx, status) {
-  // … identical to your original implementation …
-  const filter = {
-    transactionId: event.transactionId,
-    eventIndex: event.eventIndex,
-    projectId,
-  };
-  const update = {
-    $set: {
-      projectId,
-      blockHeight: event.blockHeight,
-      blockTimestamp: event.blockTimestamp,
-      type: event.type,
-      transactionId: event.transactionId,
-      eventIndex: event.eventIndex,
-      data: event.data,
-      processedAt: new Date(),
-      // minimal extras; expand as in your old code if needed
+// storeEvent (unchanged apart from minimal fields)
+async function storeEvent(ev) {
+  await eventsCollection.updateOne(
+    { projectId, transactionId: ev.transactionId, eventIndex: ev.eventIndex },
+    {
+      $set: {
+        projectId,
+        blockHeight: ev.blockHeight,
+        blockTimestamp: ev.blockTimestamp,
+        type: ev.type,
+        transactionId: ev.transactionId,
+        eventIndex: ev.eventIndex,
+        data: ev.data,
+        processedAt: new Date(),
+      },
     },
-  };
-  await eventsCollection.updateOne(filter, update, { upsert: true });
-
-  return true;
+    { upsert: true }
+  );
 }
 
-// ── Main monitor ───────────────────────────────────────────────────────
+// ── Monitor loop ─────────────────────────────────────────────────
 async function startMonitor() {
-  // dynamic import for p-limit
   const { default: pLimit } = await import("p-limit");
 
-  if (!FLOW_ACCESS_NODE) {
-    console.error("FLOW_ACCESS_NODE missing");
+  if (!FLOW_ACCESS_NODE || !MONGODB_URI) {
+    console.error("FLOW_ACCESS_NODE or MONGODB_URI missing");
     process.exit(1);
   }
-  if (!MONGODB_URI) {
-    console.error("MONGODB_URI missing");
-    process.exit(1);
-  }
-
   await fcl.config().put("accessNode.api", FLOW_ACCESS_NODE);
   await connectToMongo();
 
-  // helper for parallel Tx fetches under current params
-  const txFetchLimit = () => pLimit(params.TX_FETCH_CONCURRENCY);
+  const txLimit = () => pLimit(params.TX_FETCH_CONCURRENCY);
 
-  // polling loop (recursive setTimeout)
-  async function pollEvents() {
+  async function poll() {
     let delay = params.POLLING_DELAY;
     try {
-      const latestSealed = await getLatestSealedBlockHeight();
-      const lastProcessed = await getLatestProcessedBlockHeight();
-      let from = lastProcessed
-        ? lastProcessed + 1
-        : Math.max(1, latestSealed - 5);
+      const head = await headBlock();
+      const last = await lastProcessed();
+      let from = last ? last + 1 : Math.max(1, head - 5);
 
-      // switch tuning profile if needed
-      const distance = latestSealed - from;
-      if (distance > BEHIND_THRESHOLD && params !== CATCH_UP) {
-        console.log(`⚡ Catch-up mode (${distance} blocks behind)`);
+      const lag = head - from;
+      if (lag > BEHIND_THRESHOLD && params !== CATCH_UP) {
+        console.log(`⚡ Catch-up mode (${lag} blocks behind)`);
         params = { ...CATCH_UP };
-      } else if (distance <= BEHIND_THRESHOLD && params !== LIVE) {
+      } else if (lag <= BEHIND_THRESHOLD && params !== LIVE) {
         console.log("✅ Live mode – fully caught up");
         params = { ...LIVE };
       }
 
-      if (from > latestSealed) {
-        process.stdout.write(`Waiting for new blocks… head=${latestSealed}\r`);
+      if (from > head) {
+        process.stdout.write(`Waiting … head=${head}\r`);
         delay = params.CAUGHT_UP_POLL_DELAY;
-        setTimeout(pollEvents, delay);
+        setTimeout(poll, delay);
         return;
       }
 
-      const to = Math.min(from + params.BLOCK_POLL_RANGE - 1, latestSealed);
-      console.log(`Polling ${from}-${to} (head ${latestSealed})`);
+      const to = Math.min(from + params.BLOCK_POLL_RANGE - 1, head);
+      console.log(`Polling ${from}-${to}`);
 
-      // ─── 1. fetch events for *all* types in parallel ────────────────
-      const eventsNested = await Promise.all(
-        eventTypes.map((type) =>
+      // 1) fetch events for all types
+      const arrays = await Promise.all(
+        eventTypes.map((t) =>
           fcl
-            .send([fcl.getEventsAtBlockHeightRange(type, from, to)])
+            .send([fcl.getEventsAtBlockHeightRange(t, from, to)])
             .then(fcl.decode)
-            .catch((err) => {
-              if (!/event type not found|cannot get events/.test(err.message))
-                console.warn(`WARN event ${type}: ${err.message}`);
-              return [];
-            })
+            .catch(() => [])
         )
       );
-      const allEvents = eventsNested.flat();
-      if (!allEvents.length) {
-        console.log(" -> no relevant events");
+      const events = arrays.flat();
+      if (events.length) {
+        console.log(` -> ${events.length} events`);
+        // upsert in parallel
+        await Promise.all(events.map((e) => storeEvent(e)));
       } else {
-        console.log(` -> found ${allEvents.length} events`);
-        // ─── 2. get unique tx IDs ─────────────────────────────────────
-        const uniqTxIds = [...new Set(allEvents.map((e) => e.transactionId))];
-        const cache = new Map();
-        // fetch Tx + status with concurrency limit
-        await Promise.all(
-          uniqTxIds.map((id) =>
-            txFetchLimit()(async () => {
-              try {
-                const [tx, st] = await Promise.all([
-                  fcl.send([fcl.getTransaction(id)]).then(fcl.decode),
-                  fcl.send([fcl.getTransactionStatus(id)]).then(fcl.decode),
-                ]);
-                cache.set(id, { tx, st });
-              } catch (e) {
-                cache.set(id, { tx: null, st: null });
-              }
-            })
-          )
-        );
-
-        // sort events deterministically
-        allEvents.sort(
-          (a, b) =>
-            a.blockHeight - b.blockHeight ||
-            (a.transactionIndex ?? 0) - (b.transactionIndex ?? 0) ||
-            a.eventIndex - b.eventIndex
-        );
-
-        // store
-        let stored = 0;
-        for (const ev of allEvents) {
-          if (
-            await storeEvent(
-              ev,
-              cache.get(ev.transactionId)?.tx,
-              cache.get(ev.transactionId)?.st
-            )
-          )
-            stored++;
-        }
-        console.log(` -> stored ${stored}/${allEvents.length}`);
+        console.log(" -> none");
       }
 
-      // write checkpoint
+      // checkpoint
       await processedBlocksCol.updateOne(
         { projectId },
         { $set: { blockHeight: to, updatedAt: new Date() } },
         { upsert: true }
       );
-    } catch (err) {
-      console.error(`pollEvents error: ${err.message}`, err);
+    } catch (e) {
+      console.error("poll error:", e.message);
       delay = params.CAUGHT_UP_POLL_DELAY * 2;
     } finally {
-      setTimeout(pollEvents, delay);
+      setTimeout(poll, delay);
     }
   }
 
-  console.log(`Monitoring started (project ${projectId})`);
-  console.log(`Event types: ${eventTypes.length}`);
-  pollEvents();
+  console.log(`Monitor started – ${eventTypes.length} event types`);
+  poll();
 }
 
-// ── graceful shutdown ──────────────────────────────────────────────────
-async function cleanup() {
-  console.log("\nShutting down monitor…");
-  if (mongoClient?.close) await mongoClient.close();
+// ── graceful shutdown ───────────────────────────────────────────
+process.on("SIGINT", async () => {
+  await mongoClient?.close();
   process.exit(0);
-}
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
+});
+process.on("SIGTERM", async () => {
+  await mongoClient?.close();
+  process.exit(0);
+});
 
-// ── bootstrap ──────────────────────────────────────────────────────────
-startMonitor().catch(async (err) => {
-  console.error("Fatal startup error:", err);
-  if (mongoClient?.close) await mongoClient.close();
+// ── kick-off ─────────────────────────────────────────────────────
+startMonitor().catch(async (e) => {
+  console.error("Fatal:", e);
+  await mongoClient?.close();
   process.exit(1);
 });
