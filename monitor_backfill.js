@@ -1,36 +1,36 @@
-// monitor.js  ––– Flow event monitor (TSHOT removed, slower polling)
-
+// monitor.js  ––– Flow event monitor + lifetime wallet_stats updater
 /* eslint-disable no-console */
 const fcl = require("@onflow/fcl");
 const { MongoClient } = require("mongodb");
 require("dotenv").config();
 
+/* ────────── ENV & CONSTS ────────── */
 const FLOW_ACCESS_NODE = process.env.FLOW_ACCESS_NODE;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DATABASE_NAME = "flow_events";
 const RAW_EVENTS_COLLECTION = "raw_events";
 const PROCESSED_BLOCKS_COLLECTION = "processed_blocks";
+const WALLET_STATS_COLLECTION = "wallet_stats"; // NEW
 const projectId = process.env.PROJECT_ID || "flow_monitors";
 
-// ── Tuning profiles ────────────────────────────────────────────────
+/* ── Progress tuning ── */
 const LIVE = {
   TX_FETCH_CONCURRENCY: 8,
   BLOCK_POLL_RANGE: 25,
-  POLLING_DELAY: 2000, // 2 s
-  CAUGHT_UP_POLL_DELAY: 10000, // 10 s idle wait
+  POLLING_DELAY: 2000,
+  CAUGHT_UP_POLL_DELAY: 10000,
 };
-
 const CATCH_UP = {
   TX_FETCH_CONCURRENCY: 32,
   BLOCK_POLL_RANGE: 250,
   POLLING_DELAY: 0,
   CAUGHT_UP_POLL_DELAY: 2000,
 };
-const BEHIND_THRESHOLD = 10_000; // ≈2 h
+const BEHIND_THRESHOLD = 10_000; // ≈2h
 
 let params = { ...LIVE };
 
-// ── Contract map (TSHOT removed) ───────────────────────────────────
+/* ── Contract event map ── */
 const contracts = {
   TSHOT_EXCHANGE: {
     address: "A.05b67ba314000b2d.TSHOTExchange",
@@ -41,7 +41,7 @@ const contracts = {
     ],
   },
   TSHOT_FLOW_PAIR: {
-    address: "A.5eaa6c0b37002bbd.SwapPair",
+    /* kept for raw logging */ address: "A.5eaa6c0b37002bbd.SwapPair",
     events: [
       "TokensInitialized",
       "TokensMinted",
@@ -53,13 +53,16 @@ const contracts = {
     ],
   },
 };
-
 const eventTypes = Object.values(contracts).flatMap((c) =>
   c.events.map((ev) => `${c.address}.${ev}`)
 );
 
-// ── Mongo handles ─────────────────────────────────────────────────
-let mongoClient, eventsCollection, processedBlocksCol;
+/* Full strings of the two swap events we care about for wallet_stats */
+const DEPOSIT_EVT = "A.05b67ba314000b2d.TSHOTExchange.NFTToTSHOTSwapCompleted";
+const WITHDRAW_EVT = "A.05b67ba314000b2d.TSHOTExchange.TSHOTToNFTSwapCompleted";
+
+/* ── Mongo handles ── */
+let mongoClient, eventsCollection, processedBlocksCol, walletStatsCol;
 async function connectToMongo() {
   if (!mongoClient) mongoClient = new MongoClient(MONGODB_URI);
   if (!mongoClient.topology || !mongoClient.topology.isConnected()) {
@@ -69,15 +72,18 @@ async function connectToMongo() {
   const db = mongoClient.db(DATABASE_NAME);
   eventsCollection = db.collection(RAW_EVENTS_COLLECTION);
   processedBlocksCol = db.collection(PROCESSED_BLOCKS_COLLECTION);
+  walletStatsCol = db.collection(WALLET_STATS_COLLECTION); // NEW
+
   await Promise.all([
     eventsCollection.createIndex({ projectId: 1, blockHeight: -1 }),
     eventsCollection.createIndex({ transactionId: 1 }),
     eventsCollection.createIndex({ type: 1 }),
     processedBlocksCol.createIndex({ projectId: 1 }, { unique: true }),
+    walletStatsCol.createIndex({ net: -1 }), // leaderboard
   ]);
 }
 
-// ── Flow helpers ──────────────────────────────────────────────────
+/* ── Flow helpers ── */
 const headBlock = () =>
   fcl
     .send([fcl.getBlock(true)])
@@ -87,8 +93,9 @@ const headBlock = () =>
 const lastProcessed = () =>
   processedBlocksCol.findOne({ projectId }).then((d) => d?.blockHeight ?? 0);
 
-// storeEvent (unchanged apart from minimal fields)
+/* ── RAW event upsert  +  wallet_stats update ── */
 async function storeEvent(ev) {
+  // 1) raw_events
   await eventsCollection.updateOne(
     { projectId, transactionId: ev.transactionId, eventIndex: ev.eventIndex },
     {
@@ -105,9 +112,35 @@ async function storeEvent(ev) {
     },
     { upsert: true }
   );
+
+  // 2) lifetime wallet_stats  (only for the two swap-completed events)
+  if (ev.type !== DEPOSIT_EVT && ev.type !== WITHDRAW_EVT) return;
+
+  const wallet = ev.data?.payer;
+  if (!wallet) return; // skip malformed rows
+
+  const num = Number(ev.data?.numNFTs || "0");
+  if (!num) return;
+
+  const isDeposit = ev.type === DEPOSIT_EVT;
+  const incNet = isDeposit ? num : -num;
+
+  await walletStatsCol.updateOne(
+    { _id: wallet },
+    {
+      $inc: {
+        deposits: isDeposit ? num : 0,
+        withdrawals: isDeposit ? 0 : num,
+        net: incNet,
+      },
+      $min: { firstEvent: new Date(ev.blockTimestamp) },
+      $max: { lastEvent: new Date(ev.blockTimestamp) },
+    },
+    { upsert: true }
+  );
 }
 
-// ── Monitor loop ─────────────────────────────────────────────────
+/* ── Monitor loop ── */
 async function startMonitor() {
   const { default: pLimit } = await import("p-limit");
 
@@ -146,7 +179,7 @@ async function startMonitor() {
       const to = Math.min(from + params.BLOCK_POLL_RANGE - 1, head);
       console.log(`Polling ${from}-${to}`);
 
-      // 1) fetch events for all types
+      // fetch events
       const arrays = await Promise.all(
         eventTypes.map((t) =>
           fcl
@@ -158,13 +191,11 @@ async function startMonitor() {
       const events = arrays.flat();
       if (events.length) {
         console.log(` -> ${events.length} events`);
-        // upsert in parallel
-        await Promise.all(events.map((e) => storeEvent(e)));
+        await Promise.all(events.map((e) => storeEvent(e))); // <- updates both colls
       } else {
         console.log(" -> none");
       }
 
-      // checkpoint
       await processedBlocksCol.updateOne(
         { projectId },
         { $set: { blockHeight: to, updatedAt: new Date() } },
@@ -182,7 +213,7 @@ async function startMonitor() {
   poll();
 }
 
-// ── graceful shutdown ───────────────────────────────────────────
+/* ── graceful shutdown ── */
 process.on("SIGINT", async () => {
   await mongoClient?.close();
   process.exit(0);
@@ -192,7 +223,7 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-// ── kick-off ─────────────────────────────────────────────────────
+/* ── kick-off ── */
 startMonitor().catch(async (e) => {
   console.error("Fatal:", e);
   await mongoClient?.close();
