@@ -57,3 +57,23 @@ It uses a MongoDB database (defaults to `flow_events` but uses the one in your `
 
 - **`raw_events` collection:** Stores the actual event data found (block height, timestamp, transaction ID, event payload, etc.).
 - **`processed_blocks` collection:** Just keeps track of the last block height the script checked, so it knows where to pick up if restarted.
+
+# 2. Delete every untracked file & dir (logs, build/, node_modules/ etc.)
+
+git clean -fd # -f force • -d include directories
+
+# 3. Discard ALL edits to tracked files
+
+git reset --hard # working tree now matches HEAD
+
+# 4. Fetch latest refs (and remove remote branches already deleted on the server)
+
+git fetch --all --prune
+
+# 5. Hard-reset the current branch to remote tip
+
+git reset --hard origin/main
+
+# 6. OPTIONAL: prune any local tracking branches that vanished upstream
+
+git remote prune origin
