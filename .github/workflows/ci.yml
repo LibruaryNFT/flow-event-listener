@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    uses: LibruaryNFT/shared-workflows/.github/workflows/node-ci.yml@main
+    with:
+      node-version: '20'
+      test-command: 'echo "No tests yet — CI validates install + lint"'
+
+  security:
+    uses: LibruaryNFT/shared-workflows/.github/workflows/security-scan.yml@main
+
+  notify:
+    needs: [test, security]
+    if: failure()
+    uses: LibruaryNFT/shared-workflows/.github/workflows/notify-failure.yml@main
+    with:
+      project: 'flow-event-listener'
+    secrets:
+      CC_PAT: ${{ secrets.CC_PAT }}
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
