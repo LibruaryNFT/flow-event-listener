@@ -1,0 +1,66 @@
+name: Deploy to GCP VM
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-flow-event-listener
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: LibruaryNFT/shared-workflows/.github/workflows/node-ci.yml@main
+    with:
+      node-version: '20'
+      test-command: "echo 'No tests yet — CI validates install'"
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy via SSH
+        env:
+          SSH_KEY: ${{ secrets.GCP_VM_SSH_KEY }}
+          VM_HOST: ${{ secrets.GCP_VM_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh -o StrictHostKeyChecking=accept-new "deploy@${VM_HOST}" << 'DEPLOY'
+            set -e
+            cd ~/flow-event-listener
+            echo "==> Pulling latest..."
+            git pull origin main
+            echo "==> Installing dependencies..."
+            npm install --production
+            echo "==> Restarting service..."
+            sudo systemctl restart flow-event-listener
+            echo "==> Checking service status..."
+            sleep 3
+            sudo systemctl is-active flow-event-listener
+            echo "==> Deploy complete"
+          DEPLOY
+
+      - name: Verify service is running
+        env:
+          SSH_KEY: ${{ secrets.GCP_VM_SSH_KEY }}
+          VM_HOST: ${{ secrets.GCP_VM_HOST }}
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new "deploy@${VM_HOST}" \
+            "sudo journalctl -u flow-event-listener --no-pager -n 10"
+
+  notify:
+    needs: [ci, deploy]
+    if: failure()
+    uses: LibruaryNFT/shared-workflows/.github/workflows/notify-failure.yml@main
+    with:
+      project: 'flow-event-listener'
+    secrets:
+      CC_PAT: ${{ secrets.CC_PAT }}
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
