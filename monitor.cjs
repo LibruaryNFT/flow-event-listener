@@ -1,5 +1,6 @@
 /* monitor.cjs — Flow monitor + wallet_stats with retry/back-off (CommonJS) */
 /* eslint-disable no-console */
+const http = require("http");
 const fcl = require("@onflow/fcl");
 const { MongoClient } = require("mongodb");
 require("dotenv").config();
@@ -133,6 +134,46 @@ async function store(ev) {
   );
 }
 
+/* ───────── health check server ───────── */
+const HEALTH_PORT = Number(process.env.HEALTH_PORT || 8091);
+const monitorStartTime = Date.now();
+let lastProcessedBlock = 0;
+let currentMode = "STARTING";
+
+http
+  .createServer(async (req, res) => {
+    if (req.url === "/health" && (req.method === "GET" || req.method === "HEAD")) {
+      let mongoStatus = "unknown";
+      try {
+        if (mongo && mongo.topology && mongo.topology.isConnected()) {
+          mongoStatus = "connected";
+        } else {
+          mongoStatus = "disconnected";
+        }
+      } catch {
+        mongoStatus = "error";
+      }
+      const body = JSON.stringify({
+        status: mongoStatus === "connected" ? "healthy" : "degraded",
+        service: "flow-event-listener",
+        uptime: Math.floor((Date.now() - monitorStartTime) / 1000),
+        mongodb: mongoStatus,
+        mode: currentMode,
+        lastProcessedBlock,
+        eventTypes: EVENTS.length,
+        timestamp: new Date().toISOString(),
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(body);
+    } else {
+      res.writeHead(404);
+      res.end("Not found");
+    }
+  })
+  .listen(HEALTH_PORT, () => {
+    console.log(`Health check server listening on port ${HEALTH_PORT}`);
+  });
+
 /* ───────── main logic ───────── */
 async function main() {
   await fcl.config().put("accessNode.api", FLOW_ACCESS_NODE);
@@ -148,9 +189,11 @@ async function main() {
 
       if (lag > BEHIND && mode !== "CATCH") {
         mode = "CATCH";
+        currentMode = "CATCH";
         param = { ...CATCH };
       } else if (lag <= BEHIND && mode !== "LIVE") {
         mode = "LIVE";
+        currentMode = "LIVE";
         param = { ...LIVE };
       }
 
@@ -176,6 +219,7 @@ async function main() {
           { $set: { blockHeight: to, updatedAt: new Date() } },
           { upsert: true }
         );
+        lastProcessedBlock = to;
       }
     } catch (err) {
       console.error("Slice aborted:", err.message);
