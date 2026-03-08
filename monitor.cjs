@@ -1,5 +1,5 @@
 /* monitor.cjs — Flow monitor + wallet_stats with retry/back-off (CommonJS) */
-/* eslint-disable no-console */
+
 const http = require("http");
 const fcl = require("@onflow/fcl");
 const { MongoClient } = require("mongodb");

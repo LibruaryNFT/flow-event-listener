@@ -18,5 +18,9 @@
     "express": "^4.21.2",
     "mongodb": "^6.16.0",
     "p-limit": "^6.2.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.3"
   }
 }
