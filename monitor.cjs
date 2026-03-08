@@ -4,12 +4,13 @@ const http = require("http");
 const fcl = require("@onflow/fcl");
 const { MongoClient } = require("mongodb");
 require("dotenv").config();
+const logger = require("./logger.cjs");
 
 /* ───────── env vars ───────── */
 const FLOW_ACCESS_NODE = process.env.FLOW_ACCESS_NODE;
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!FLOW_ACCESS_NODE || !MONGODB_URI) {
-  console.error("FATAL: FLOW_ACCESS_NODE or MONGODB_URI missing");
+  logger.fatal("FLOW_ACCESS_NODE or MONGODB_URI missing");
   process.exit(1);
 }
 
@@ -61,14 +62,13 @@ async function retry(label, fn) {
     try {
       const t0 = Date.now();
       const res = await fn();
-      console.debug(`[RPC] ${label} ok in ${Date.now() - t0} ms`);
+      logger.debug({ label, durationMs: Date.now() - t0 }, "RPC call succeeded");
       return res;
     } catch (err) {
       const wait = BACKOFF_MS * 2 ** i + Math.random() * JITTER_MS;
-      console.warn(
-        `[RPC] ${label} fail ${
-          i + 1
-        }/${RETRIES}: ${err.message.trim()} — ${Math.round(wait)} ms`
+      logger.warn(
+        { label, attempt: i + 1, maxRetries: RETRIES, err: err.message.trim(), backoffMs: Math.round(wait) },
+        "RPC call failed, retrying"
       );
       if (i === RETRIES - 1) throw err;
       await new Promise((r) => setTimeout(r, wait));
@@ -171,14 +171,14 @@ http
     }
   })
   .listen(HEALTH_PORT, () => {
-    console.log(`Health check server listening on port ${HEALTH_PORT}`);
+    logger.info({ port: HEALTH_PORT }, "Health check server listening");
   });
 
 /* ───────── main logic ───────── */
 async function main() {
   await fcl.config().put("accessNode.api", FLOW_ACCESS_NODE);
   await mongoEnsure();
-  console.log(`Monitor ready (${EVENTS.length} event types)`);
+  logger.info({ eventTypes: EVENTS.length }, "Monitor ready");
 
   async function loop() {
     let wait = param.DELAY;
@@ -198,11 +198,11 @@ async function main() {
       }
 
       if (lag <= 0) {
-        process.stdout.write(`Idle … head=${head}\r`);
+        logger.debug({ head }, "Idle, waiting for new blocks");
         wait = param.IDLE;
       } else {
         const to = Math.min(from + param.RANGE - 1, head);
-        console.log(`[${mode}] slice ${from}-${to} (lag ${lag})`);
+        logger.info({ mode, from, to, lag }, "Processing block slice");
 
         const arrays = await Promise.all(
           EVENTS.map((t) => fetchEvents(t, from, to).catch(() => []))
@@ -210,9 +210,9 @@ async function main() {
         const evs = arrays.flat();
 
         if (evs.length) {
-          console.log(` · ${evs.length} events`);
+          logger.info({ count: evs.length }, "Events found in slice");
           await Promise.all(evs.map(store));
-        } else console.log(" · none");
+        } else logger.debug("No events in slice");
 
         await processed.updateOne(
           { projectId },
@@ -222,7 +222,7 @@ async function main() {
         lastProcessedBlock = to;
       }
     } catch (err) {
-      console.error("Slice aborted:", err.message);
+      logger.error({ err: err.message }, "Slice aborted");
       wait = param.IDLE * 2; // heavy back-off
     } finally {
       setTimeout(loop, wait);
@@ -233,7 +233,7 @@ async function main() {
 }
 
 main().catch(async (e) => {
-  console.error("Fatal:", e);
+  logger.fatal({ err: e.message }, "Fatal error");
   await mongo?.close();
   process.exit(1);
 });

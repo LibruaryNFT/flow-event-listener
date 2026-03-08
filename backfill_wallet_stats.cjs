@@ -10,6 +10,7 @@
 const { MongoClient } = require("mongodb");
 const cliProgress = require("cli-progress");
 require("dotenv").config();
+const logger = require("./logger.cjs");
 
 /* ---------- CONFIG ---------- */
 const URI = process.env.MONGODB_URI; // e.g. mongodb://localhost:27017
@@ -30,7 +31,7 @@ const FIELD_WITHDRAW = "TSHOTToNFTSwapCompleted";
 
 (async () => {
   if (!URI) {
-    console.error("ERROR: set MONGODB_URI");
+    logger.fatal("MONGODB_URI is not set");
     process.exit(1);
   }
 
@@ -41,12 +42,12 @@ const FIELD_WITHDRAW = "TSHOTToNFTSwapCompleted";
   const ws = db.collection(STATS_COL);
 
   await ws.deleteMany({});
-  console.log("wallet_stats cleared.");
+  logger.info("wallet_stats cleared");
 
   const total = await raw.countDocuments({
     type: { $in: [DEPOSIT_EVT_STR, WITHDRAW_EVT_STR] },
   });
-  console.log("Swap events to process:", total);
+  logger.info({ total }, "Swap events to process");
 
   const bar = new cliProgress.SingleBar(
     { format: "Progress |{bar}| {percentage}% {value}/{total}" },
@@ -100,6 +101,6 @@ const FIELD_WITHDRAW = "TSHOTToNFTSwapCompleted";
 
   bar.stop();
   await ws.createIndex({ net: -1 });
-  console.log("Back-fill complete.");
+  logger.info("Back-fill complete");
   await client.close();
 })();
