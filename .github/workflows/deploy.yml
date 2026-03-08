@@ -1,0 +1,53 @@
+name: Deploy to Hetzner VPS
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: LibruaryNFT/shared-workflows/.github/workflows/node-ci.yml@main
+    with:
+      test-command: "echo 'No tests yet — CI validates install'"
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VAULTOPOLIS_VPS_SSH_KEY }}" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.VAULTOPOLIS_VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VAULTOPOLIS_VPS_HOST }} '
+            cd /opt/flow-event-listener &&
+            git pull origin main &&
+            chown -R nodeservices:nodeservices /opt/flow-event-listener &&
+            npm install --production &&
+            chown -R nodeservices:nodeservices /opt/flow-event-listener &&
+            systemctl restart flow-event-listener
+          '
+
+      - name: Health check
+        run: |
+          sleep 10
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.VAULTOPOLIS_VPS_HOST }} \
+            'curl -sf http://localhost:8091/health | python3 -m json.tool'
+
+      - name: Notify failure
+        if: failure()
+        uses: LibruaryNFT/shared-workflows/.github/workflows/notify-failure.yml@main
+        secrets: inherit
