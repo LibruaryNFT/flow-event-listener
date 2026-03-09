@@ -4,9 +4,8 @@
  *
  * Usage: node scripts/bulk-import.js /path/to/export/dir
  *
- * Much faster than shell+jq approach — uses Node streams and pg COPY protocol.
- * Handles ~20GB of compressed JSONL across 4000+ files.
- * Supports resume via progress file.
+ * Streams compressed JSONL files, builds multi-row VALUES inserts.
+ * Handles ~20GB across 4000+ files. Supports resume via progress file.
  */
 
 const fs = require("fs");
@@ -14,8 +13,6 @@ const path = require("path");
 const zlib = require("zlib");
 const readline = require("readline");
 const { Pool } = require("pg");
-const { pipeline } = require("stream/promises");
-const { Writable, Transform } = require("stream");
 
 const EXPORT_DIR = process.argv[2];
 if (!EXPORT_DIR) {
@@ -27,7 +24,7 @@ const DB_URL =
   process.env.POSTGRES_EVENTS_URI ||
   "postgresql://indexer:indexer_secure_2026@localhost:5432/flow_events";
 const PROGRESS_FILE = path.join(EXPORT_DIR, ".import-progress");
-const BATCH_SIZE = 5000;
+const BATCH_SIZE = 2000;
 
 async function main() {
   const pool = new Pool({ connectionString: DB_URL, max: 4 });
@@ -74,7 +71,6 @@ async function main() {
     const client = await pool.connect();
 
     try {
-      // Read compressed JSONL line by line
       const fileStream = fs.createReadStream(filePath);
       const gunzip = zlib.createGunzip();
       const rl = readline.createInterface({
@@ -98,7 +94,6 @@ async function main() {
         }
       }
 
-      // Flush remaining
       if (batch.length > 0) {
         rows += await insertBatch(client, batch);
       }
@@ -115,7 +110,6 @@ async function main() {
       `[${fileNum + skipped}/${files.length}] ${file}: ${rows.toLocaleString()} rows (${elapsed}s) | Total: ${totalRows.toLocaleString()} | ${rate}/s | ${totalElapsed}min\n`
     );
 
-    // Record progress
     fs.writeFileSync(PROGRESS_FILE, file);
   }
 
@@ -148,43 +142,45 @@ async function main() {
 async function insertBatch(client, batch) {
   if (batch.length === 0) return 0;
 
-  // Build multi-row INSERT with unnest for maximum speed
-  const blockHeights = [];
-  const blockTimestamps = [];
-  const txHashes = [];
-  const logIndexes = [];
-  const topicsArr = [];
-  const dataArr = [];
+  // Build multi-row INSERT with parameterized VALUES
+  const values = [];
+  const params = [];
+  let paramIdx = 1;
 
   for (const row of batch) {
-    blockHeights.push(row.block_height);
-    blockTimestamps.push(row.block_timestamp);
-    txHashes.push(row.transaction_hash);
-    logIndexes.push(row.log_index);
-    // topics is an array of strings — format as PostgreSQL array literal
-    topicsArr.push(row.topics || []);
-    // data is a JSON string in BigQuery — store as-is (JSONB will parse it)
-    dataArr.push(
-      typeof row.data === "string" ? row.data : JSON.stringify(row.data || null)
+    // BigQuery exports numbers as strings — cast them
+    const blockHeight = parseInt(row.block_height, 10);
+    const logIndex = parseInt(row.log_index, 10);
+    // Format topics as PostgreSQL array literal: {val1,val2}
+    const topicsLiteral =
+      "{" + (row.topics || []).map((t) => '"' + t + '"').join(",") + "}";
+    // data is a JSON string from BigQuery
+    const dataStr =
+      typeof row.data === "string"
+        ? row.data
+        : JSON.stringify(row.data || null);
+
+    values.push(
+      `($${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3}, $${paramIdx + 4}::text[], $${paramIdx + 5}::jsonb)`
     );
+    params.push(
+      blockHeight,
+      row.block_timestamp,
+      row.transaction_hash,
+      logIndex,
+      topicsLiteral,
+      dataStr
+    );
+    paramIdx += 6;
   }
 
-  const result = await client.query(
-    `
+  const sql = `
     INSERT INTO flow_raw_events (block_height, block_timestamp, transaction_hash, log_index, topics, data)
-    SELECT * FROM unnest(
-      $1::bigint[],
-      $2::timestamptz[],
-      $3::text[],
-      $4::integer[],
-      $5::text[][],
-      $6::jsonb[]
-    )
+    VALUES ${values.join(",\n")}
     ON CONFLICT DO NOTHING
-  `,
-    [blockHeights, blockTimestamps, txHashes, logIndexes, topicsArr, dataArr]
-  );
+  `;
 
+  const result = await client.query(sql, params);
   return result.rowCount;
 }
 
