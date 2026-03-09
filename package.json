@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "indexer": "node indexer/index.cjs",
+    "monitor": "node monitor.cjs"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +20,7 @@
     "express": "^4.21.2",
     "mongodb": "^6.16.0",
     "p-limit": "^6.2.0",
+    "pg": "^8.20.0",
     "pino": "^10.3.1"
   },
   "devDependencies": {
