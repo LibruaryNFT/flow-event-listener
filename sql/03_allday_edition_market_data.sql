@@ -129,8 +129,9 @@ CREATE INDEX IF NOT EXISTS idx_allday_emd_grail_score ON allday_edition_market_d
 -- ---------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION refresh_allday_edition_market_data()
 RETURNS void
-LANGUAGE sql
+LANGUAGE plpgsql
 AS $$
+BEGIN
 
 TRUNCATE allday_edition_market_data;
 
@@ -989,4 +990,5 @@ LEFT JOIN dapper_asp da ON e.edition_id = da.edition_id
 LEFT JOIN allday_edition_supply es ON e.edition_id = es.edition_id
 WHERE COALESCE(mc.mint_count, 0) > 0;
 
+END;
 $$;

@@ -118,8 +118,9 @@ CREATE INDEX IF NOT EXISTS idx_pemd_grail_score ON pinnacle_edition_market_data 
 -- ---------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION refresh_pinnacle_edition_market_data()
 RETURNS void
-LANGUAGE sql
+LANGUAGE plpgsql
 AS $$
+BEGIN
 
 TRUNCATE pinnacle_edition_market_data;
 
@@ -904,4 +905,5 @@ LEFT JOIN dapper_asp da ON e.edition_id = da.edition_id
 LEFT JOIN pinnacle_edition_supply es ON e.edition_id = es.edition_id
 WHERE COALESCE(mc.mint_count, e.max_mint_size, 0) > 0;
 
+END;
 $$;
