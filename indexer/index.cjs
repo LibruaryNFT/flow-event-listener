@@ -178,7 +178,7 @@ function passesFilter(event) {
   if (!filterDef) return true;
 
   // Check the filter field in the event data
-  const filterValue = event.data?.[filterDef.filterField] || "";
+  const filterValue = String(event.data?.[filterDef.filterField] ?? "");
   return config.NFT_TYPE_PREFIXES.some((prefix) =>
     filterValue.startsWith(prefix)
   );
