@@ -240,8 +240,8 @@ WITH
     WHERE al.price > 0
       AND al.block_timestamp >= NOW() - INTERVAL '365 days'
       AND (
-        (NULLIF(TRIM(e.raw_data->>'expiry'), ''))::bigint IS NULL
-        OR (NULLIF(TRIM(e.raw_data->>'expiry'), ''))::bigint > EXTRACT(EPOCH FROM NOW())::bigint
+        CASE WHEN TRIM(e.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'expiry'))::bigint ELSE NULL END IS NULL
+        OR CASE WHEN TRIM(e.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'expiry'))::bigint ELSE NULL END > EXTRACT(EPOCH FROM NOW())::bigint
       )
     GROUP BY al.edition_id
   ),
@@ -258,8 +258,8 @@ WITH
     WHERE al.price > 0
       AND al.block_timestamp >= NOW() - INTERVAL '365 days'
       AND (
-        (NULLIF(TRIM(e.raw_data->>'expiry'), ''))::bigint IS NULL
-        OR (NULLIF(TRIM(e.raw_data->>'expiry'), ''))::bigint > EXTRACT(EPOCH FROM NOW())::bigint
+        CASE WHEN TRIM(e.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'expiry'))::bigint ELSE NULL END IS NULL
+        OR CASE WHEN TRIM(e.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'expiry'))::bigint ELSE NULL END > EXTRACT(EPOCH FROM NOW())::bigint
       )
     GROUP BY al.edition_id
   ),
@@ -326,8 +326,8 @@ WITH
         -- Dapper V2/V3 listings have no $.expiry -> NULL IS NULL -> kept.
         -- Flowty NFTStorefrontV2 listings carry a $.expiry UNIX epoch -> checked live.
         AND (
-          (NULLIF(TRIM(e.raw_data->>'expiry'), ''))::bigint IS NULL
-          OR (NULLIF(TRIM(e.raw_data->>'expiry'), ''))::bigint > EXTRACT(EPOCH FROM NOW())::bigint
+          CASE WHEN TRIM(e.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'expiry'))::bigint ELSE NULL END IS NULL
+          OR CASE WHEN TRIM(e.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'expiry'))::bigint ELSE NULL END > EXTRACT(EPOCH FROM NOW())::bigint
         )
     ) listings
     LEFT JOIN offer_stats os ON listings.edition_id = os.edition_id
@@ -496,7 +496,7 @@ WITH
   mint_serial AS (
     SELECT DISTINCT ON (e.nft_id)
       e.nft_id AS moment_id,
-      (NULLIF(TRIM(e.raw_data->'metadata'->>'serialNumber'), ''))::bigint AS serial_number
+      CASE WHEN TRIM(e.raw_data->>'serialNumber') ~ '^[0-9]+$' THEN (TRIM(e.raw_data->>'serialNumber'))::bigint ELSE NULL END AS serial_number
     FROM topshot_events e
     WHERE e.event_type = 'MomentMinted'
     ORDER BY e.nft_id, e.block_timestamp ASC, e.event_order ASC, e.transaction_hash ASC
@@ -505,7 +505,7 @@ WITH
   play_jersey AS (
     SELECT
       play_id,
-      (NULLIF(NULLIF(jersey_number, 'N/A'), ''))::bigint AS jersey_number_int
+      CASE WHEN NULLIF(NULLIF(jersey_number, 'N/A'), '') ~ '^[0-9]+$' THEN (NULLIF(NULLIF(jersey_number, 'N/A'), ''))::bigint ELSE NULL END AS jersey_number_int
     FROM topshot_plays
   ),
 

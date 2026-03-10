@@ -136,7 +136,7 @@ WITH
       e.set_id,
       e.edition_type_id,
       et.edition_type_name,
-      et.is_limited,
+      et.is_limited::boolean,
       et.is_maturing,
       COALESCE(e.character_name, sh.character_name) AS character_name,
       sh.shape_name,

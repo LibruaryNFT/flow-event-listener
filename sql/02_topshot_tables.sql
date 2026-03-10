@@ -271,6 +271,7 @@ WHERE
         OR
         (event_type = 'OfferCompleted' AND raw_data->>'purchased' = 'true')
     )
+    AND nft_id IS NOT NULL
     -- EXCLUDE Dapper buyback accounts (not real market sales)
     AND buyer_address NOT IN (
         '0xe1f2a091f7bb5245',  -- Dapper reserve/buyback
@@ -407,8 +408,8 @@ WHERE l.rn = 1
     )
     -- EXCLUDE expired Flowty listings (NFTStorefrontV2 listings carry $.expiry UNIX epoch)
     AND (
-        (NULLIF(TRIM(l.raw_data->>'expiry'), ''))::bigint IS NULL
-        OR (NULLIF(TRIM(l.raw_data->>'expiry'), ''))::bigint > EXTRACT(EPOCH FROM NOW())::bigint
+        CASE WHEN TRIM(l.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(l.raw_data->>'expiry'))::bigint ELSE NULL END IS NULL
+        OR CASE WHEN TRIM(l.raw_data->>'expiry') ~ '^[0-9]+$' THEN (TRIM(l.raw_data->>'expiry'))::bigint ELSE NULL END > EXTRACT(EPOCH FROM NOW())::bigint
     );
 
 -- ─────────────────────────────────────────────────────────────
