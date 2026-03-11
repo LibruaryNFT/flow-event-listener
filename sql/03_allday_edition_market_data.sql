@@ -358,10 +358,11 @@ WITH
       s.serial_number,
       mc.max_serial,
       ed.jersey_number,
-      (
+      COALESCE(
         s.serial_number = 1
         OR (mc.max_serial IS NOT NULL AND s.serial_number = mc.max_serial)
-        OR (ed.jersey_number IS NOT NULL AND s.serial_number = ed.jersey_number)
+        OR (ed.jersey_number IS NOT NULL AND s.serial_number = ed.jersey_number),
+        false
       ) AS is_special_serial,
       (
         COALESCE(fp.floor_price, 0) > 0
@@ -411,10 +412,11 @@ WITH
       s.serial_number,
       mc.max_serial,
       ed.jersey_number,
-      (
+      COALESCE(
         s.serial_number = 1
         OR (mc.max_serial IS NOT NULL AND s.serial_number = mc.max_serial)
-        OR (ed.jersey_number IS NOT NULL AND s.serial_number = ed.jersey_number)
+        OR (ed.jersey_number IS NOT NULL AND s.serial_number = ed.jersey_number),
+        false
       ) AS is_special_serial,
       (
         COALESCE(fp.floor_price, 0) > 0

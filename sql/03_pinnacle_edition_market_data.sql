@@ -137,7 +137,7 @@ WITH
       e.edition_type_id,
       et.edition_type_name,
       et.is_limited::boolean,
-      et.is_maturing,
+      et.is_maturing::boolean,
       COALESCE(e.character_name, sh.character_name) AS character_name,
       sh.shape_name,
       se.series_name,
@@ -352,9 +352,10 @@ WITH
       s.block_timestamp,
       s.serial_number,
       e.max_mint_size,
-      (
+      COALESCE(
         s.serial_number = 1
-        OR (e.max_mint_size IS NOT NULL AND s.serial_number = e.max_mint_size)
+        OR (e.max_mint_size IS NOT NULL AND s.serial_number = e.max_mint_size),
+        false
       ) AS is_special_serial,
       (
         COALESCE(fp.floor_price, 0) > 0
@@ -402,9 +403,10 @@ WITH
       s.block_timestamp,
       s.serial_number,
       e.max_mint_size,
-      (
+      COALESCE(
         s.serial_number = 1
-        OR (e.max_mint_size IS NOT NULL AND s.serial_number = e.max_mint_size)
+        OR (e.max_mint_size IS NOT NULL AND s.serial_number = e.max_mint_size),
+        false
       ) AS is_special_serial,
       (
         COALESCE(fp.floor_price, 0) > 0

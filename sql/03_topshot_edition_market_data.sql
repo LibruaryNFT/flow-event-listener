@@ -516,10 +516,11 @@ WITH
       ms.serial_number,
       pj.jersey_number_int,
       ed.mint_count,
-      (
+      COALESCE(
         ms.serial_number = 1
         OR (pj.jersey_number_int IS NOT NULL AND ms.serial_number = pj.jersey_number_int)
-        OR (ed.mint_count IS NOT NULL AND ms.serial_number = ed.mint_count)
+        OR (ed.mint_count IS NOT NULL AND ms.serial_number = ed.mint_count),
+        false
       ) AS is_special_serial,
       -- WASH TRADE / FRAUD DETECTION: sale price > 10x floor = outlier
       (
@@ -586,10 +587,11 @@ WITH
       ms.serial_number,
       pj.jersey_number_int,
       ed.mint_count,
-      (
+      COALESCE(
         ms.serial_number = 1
         OR (pj.jersey_number_int IS NOT NULL AND ms.serial_number = pj.jersey_number_int)
-        OR (ed.mint_count IS NOT NULL AND ms.serial_number = ed.mint_count)
+        OR (ed.mint_count IS NOT NULL AND ms.serial_number = ed.mint_count),
+        false
       ) AS is_special_serial,
       -- WASH TRADE / FRAUD DETECTION: sale price > 10x floor = outlier
       (
