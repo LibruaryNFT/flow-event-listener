@@ -25,7 +25,7 @@ const logger = require("./logger.cjs");
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.API_PORT || "8080", 10);
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const CACHE_TTL_MS = 5 * 1000; // 5 seconds — realtime refresh runs inline with indexer
 
 const CORS_ORIGINS = [
   "https://vaultopolis.com",
@@ -569,6 +569,192 @@ app.get(
   rateLimit,
   marketDataHandler(PINNACLE_CONFIG)
 );
+
+// ─── TSHOT Swap Events & Wallet Stats ────────────────────────────────────────
+// Derived directly from flow_raw_events — replaces MongoDB monitor.cjs pipeline
+
+const DEPOSIT_EVT = "A.05b67ba314000b2d.TSHOTExchange.NFTToTSHOTSwapCompleted";
+const WITHDRAW_EVT = "A.05b67ba314000b2d.TSHOTExchange.TSHOTToNFTSwapCompleted";
+
+// GET /wallet-events/:wallet — paginated swap history for a wallet
+app.get("/wallet-events/:wallet", rateLimit, async (req, res) => {
+  try {
+    const wallet = req.params.wallet;
+    if (!wallet) return res.status(400).json({ error: "wallet address required" });
+
+    const cacheKey = `wallet-events:${wallet}:${req.originalUrl}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    const conditions = ["topics[1] IN ($1, $2)", "data->>'payer' = $3"];
+    const params = [DEPOSIT_EVT, WITHDRAW_EVT, wallet];
+    let paramIdx = 4;
+
+    // Optional type filter
+    if (req.query.type === "deposit") {
+      conditions.push(`topics[1] = $${paramIdx++}`);
+      params.push(DEPOSIT_EVT);
+    } else if (req.query.type === "withdraw") {
+      conditions.push(`topics[1] = $${paramIdx++}`);
+      params.push(WITHDRAW_EVT);
+    }
+
+    // Optional date range
+    if (req.query.from) {
+      conditions.push(`block_timestamp >= $${paramIdx++}`);
+      params.push(new Date(req.query.from));
+    }
+    if (req.query.to) {
+      conditions.push(`block_timestamp <= $${paramIdx++}`);
+      params.push(new Date(req.query.to));
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const offset = (page - 1) * limit;
+
+    const [countResult, dataResult] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total FROM flow_raw_events ${where}`, params),
+      pool.query(
+        `SELECT block_height AS "blockHeight", block_timestamp AS "blockTimestamp",
+                transaction_hash AS "transactionId", topics[1] AS type,
+                data->>'numNFTs' AS "numNFTs", data->>'amountBurned' AS "amountBurned",
+                data->>'receiptID' AS "receiptID"
+         FROM flow_raw_events ${where}
+         ORDER BY block_height DESC
+         LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+        [...params, limit, offset]
+      ),
+    ]);
+
+    const totalItems = parseInt(countResult.rows[0].total);
+    const response = {
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      currentPage: page,
+      items: dataResult.rows,
+    };
+
+    setCache(cacheKey, response);
+    res.json(response);
+  } catch (err) {
+    logger.error({ err: err.message }, "Error in /wallet-events");
+    res.status(500).json({ error: "Unable to fetch events" });
+  }
+});
+
+// GET /wallet-stats — aggregated wallet stats (leaderboard)
+// GET /wallet-stats/:wallet — stats for a specific wallet
+app.get("/wallet-stats/:wallet?", rateLimit, async (req, res) => {
+  try {
+    const wallet = req.params.wallet || req.query.wallet;
+    const cacheKey = `wallet-stats:${req.originalUrl}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    const conditions = ["topics[1] IN ($1, $2)"];
+    const params = [DEPOSIT_EVT, WITHDRAW_EVT];
+    let paramIdx = 3;
+
+    // If specific wallet requested, filter at the raw event level
+    if (wallet) {
+      conditions.push(`data->>'payer' = $${paramIdx++}`);
+      params.push(wallet);
+    }
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+
+    // Pagination
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+
+    // Sort
+    const sortMap = {
+      netDesc: "net DESC",
+      netAsc: "net ASC",
+      depositsDesc: '"NFTToTSHOTSwapCompleted" DESC',
+      withdrawDesc: '"TSHOTToNFTSwapCompleted" DESC',
+    };
+    const sortClause = sortMap[req.query.sort] || "net DESC";
+
+    // MinNet filter
+    let havingClause = "";
+    if (req.query.minNet) {
+      const n = parseInt(req.query.minNet);
+      if (!isNaN(n)) havingClause = `HAVING SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE -(data->>'numNFTs')::int END) >= ${n}`;
+    }
+
+    const statsQuery = `
+      WITH wallet_agg AS (
+        SELECT
+          data->>'payer' AS _id,
+          SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE 0 END) AS "NFTToTSHOTSwapCompleted",
+          SUM(CASE WHEN topics[1] = $2 THEN (data->>'numNFTs')::int ELSE 0 END) AS "TSHOTToNFTSwapCompleted",
+          SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE -(data->>'numNFTs')::int END) AS net,
+          MIN(block_timestamp) AS "firstEvent",
+          MAX(block_timestamp) AS "lastEvent"
+        FROM flow_raw_events
+        ${where}
+        GROUP BY data->>'payer'
+        ${havingClause}
+      )
+      SELECT * FROM wallet_agg
+      ORDER BY ${sortClause}
+    `;
+
+    // Get total count
+    const countQuery = `SELECT COUNT(*) AS total FROM (${statsQuery}) sub`;
+    const countResult = await pool.query(countQuery, params);
+    const totalItems = parseInt(countResult.rows[0].total);
+
+    // Get page of data
+    const pagedQuery = `${statsQuery} LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
+    const dataResult = await pool.query(pagedQuery, [...params, limit, (page - 1) * limit]);
+
+    const response = {
+      totalItems,
+      totalPages: Math.ceil(totalItems / limit),
+      currentPage: page,
+      items: dataResult.rows,
+    };
+
+    setCache(cacheKey, response);
+    res.json(response);
+  } catch (err) {
+    logger.error({ err: err.message }, "Error in /wallet-stats");
+    res.status(500).json({ error: "Unable to fetch wallet stats" });
+  }
+});
+
+// GET /tshot-daily-stats — daily aggregation of TSHOT swap activity
+app.get("/tshot-daily-stats", rateLimit, async (req, res) => {
+  try {
+    const cacheKey = "tshot-daily-stats";
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    const result = await pool.query(`
+      SELECT
+        TO_CHAR(block_timestamp, 'YYYY-MM-DD') AS date,
+        SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE 0 END) AS "dailyIncoming",
+        SUM(CASE WHEN topics[1] = $2 THEN (data->>'numNFTs')::int ELSE 0 END) AS "dailyOutgoing",
+        SUM((data->>'numNFTs')::int) AS "dailyTotalExchanged",
+        COUNT(DISTINCT data->>'payer') AS "dailyUniqueWallets"
+      FROM flow_raw_events
+      WHERE topics[1] IN ($1, $2)
+        AND block_timestamp >= '2025-05-01'
+      GROUP BY TO_CHAR(block_timestamp, 'YYYY-MM-DD')
+      ORDER BY date ASC
+    `, [DEPOSIT_EVT, WITHDRAW_EVT]);
+
+    setCache(cacheKey, result.rows);
+    res.json(result.rows);
+  } catch (err) {
+    logger.error({ err: err.message }, "Error in /tshot-daily-stats");
+    res.status(500).json({ error: "Unable to fetch TSHOT daily stats" });
+  }
+});
 
 // Root
 app.get("/", (_req, res) => {
