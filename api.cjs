@@ -646,6 +646,7 @@ app.get("/wallet-events/:wallet", rateLimit, async (req, res) => {
 
 // GET /wallet-stats — aggregated wallet stats (leaderboard)
 // GET /wallet-stats/:wallet — stats for a specific wallet
+// Reads from tshot_wallet_stats materialized view (refreshed by flow-refresh.sh)
 app.get("/wallet-stats/:wallet?", rateLimit, async (req, res) => {
   try {
     const wallet = req.params.wallet || req.query.wallet;
@@ -653,17 +654,24 @@ app.get("/wallet-stats/:wallet?", rateLimit, async (req, res) => {
     const cached = getCached(cacheKey);
     if (cached) return res.json(cached);
 
-    const conditions = ["topics[1] IN ($1, $2)"];
-    const params = [DEPOSIT_EVT, WITHDRAW_EVT];
-    let paramIdx = 3;
+    const conditions = [];
+    const params = [];
+    let paramIdx = 1;
 
-    // If specific wallet requested, filter at the raw event level
     if (wallet) {
-      conditions.push(`data->>'payer' = $${paramIdx++}`);
+      conditions.push(`wallet_address = $${paramIdx++}`);
       params.push(wallet);
     }
 
-    const where = `WHERE ${conditions.join(" AND ")}`;
+    if (req.query.minNet) {
+      const n = parseInt(req.query.minNet);
+      if (!isNaN(n)) {
+        conditions.push(`net >= $${paramIdx++}`);
+        params.push(n);
+      }
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // Pagination
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -673,44 +681,28 @@ app.get("/wallet-stats/:wallet?", rateLimit, async (req, res) => {
     const sortMap = {
       netDesc: "net DESC",
       netAsc: "net ASC",
-      depositsDesc: '"NFTToTSHOTSwapCompleted" DESC',
-      withdrawDesc: '"TSHOTToNFTSwapCompleted" DESC',
+      depositsDesc: "deposits DESC",
+      withdrawDesc: "withdrawals DESC",
     };
     const sortClause = sortMap[req.query.sort] || "net DESC";
 
-    // MinNet filter
-    let havingClause = "";
-    if (req.query.minNet) {
-      const n = parseInt(req.query.minNet);
-      if (!isNaN(n)) havingClause = `HAVING SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE -(data->>'numNFTs')::int END) >= ${n}`;
-    }
-
-    const statsQuery = `
-      WITH wallet_agg AS (
-        SELECT
-          data->>'payer' AS _id,
-          SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE 0 END) AS "NFTToTSHOTSwapCompleted",
-          SUM(CASE WHEN topics[1] = $2 THEN (data->>'numNFTs')::int ELSE 0 END) AS "TSHOTToNFTSwapCompleted",
-          SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE -(data->>'numNFTs')::int END) AS net,
-          MIN(block_timestamp) AS "firstEvent",
-          MAX(block_timestamp) AS "lastEvent"
-        FROM flow_raw_events
-        ${where}
-        GROUP BY data->>'payer'
-        ${havingClause}
-      )
-      SELECT * FROM wallet_agg
-      ORDER BY ${sortClause}
-    `;
-
-    // Get total count
-    const countQuery = `SELECT COUNT(*) AS total FROM (${statsQuery}) sub`;
-    const countResult = await pool.query(countQuery, params);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS total FROM tshot_wallet_stats ${where}`, params
+    );
     const totalItems = parseInt(countResult.rows[0].total);
 
-    // Get page of data
-    const pagedQuery = `${statsQuery} LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
-    const dataResult = await pool.query(pagedQuery, [...params, limit, (page - 1) * limit]);
+    const dataResult = await pool.query(
+      `SELECT wallet_address AS _id,
+              deposits AS "NFTToTSHOTSwapCompleted",
+              withdrawals AS "TSHOTToNFTSwapCompleted",
+              net,
+              first_event AS "firstEvent",
+              last_event AS "lastEvent"
+       FROM tshot_wallet_stats ${where}
+       ORDER BY ${sortClause}
+       LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+      [...params, limit, (page - 1) * limit]
+    );
 
     const response = {
       totalItems,
@@ -728,6 +720,7 @@ app.get("/wallet-stats/:wallet?", rateLimit, async (req, res) => {
 });
 
 // GET /tshot-daily-stats — daily aggregation of TSHOT swap activity
+// Reads from tshot_daily_stats materialized view (refreshed by flow-refresh.sh)
 app.get("/tshot-daily-stats", rateLimit, async (req, res) => {
   try {
     const cacheKey = "tshot-daily-stats";
@@ -735,18 +728,14 @@ app.get("/tshot-daily-stats", rateLimit, async (req, res) => {
     if (cached) return res.json(cached);
 
     const result = await pool.query(`
-      SELECT
-        TO_CHAR(block_timestamp, 'YYYY-MM-DD') AS date,
-        SUM(CASE WHEN topics[1] = $1 THEN (data->>'numNFTs')::int ELSE 0 END) AS "dailyIncoming",
-        SUM(CASE WHEN topics[1] = $2 THEN (data->>'numNFTs')::int ELSE 0 END) AS "dailyOutgoing",
-        SUM((data->>'numNFTs')::int) AS "dailyTotalExchanged",
-        COUNT(DISTINCT data->>'payer') AS "dailyUniqueWallets"
-      FROM flow_raw_events
-      WHERE topics[1] IN ($1, $2)
-        AND block_timestamp >= '2025-05-01'
-      GROUP BY TO_CHAR(block_timestamp, 'YYYY-MM-DD')
+      SELECT date,
+             daily_incoming AS "dailyIncoming",
+             daily_outgoing AS "dailyOutgoing",
+             daily_total_exchanged AS "dailyTotalExchanged",
+             daily_unique_wallets AS "dailyUniqueWallets"
+      FROM tshot_daily_stats
       ORDER BY date ASC
-    `, [DEPOSIT_EVT, WITHDRAW_EVT]);
+    `);
 
     setCache(cacheKey, result.rows);
     res.json(result.rows);
