@@ -586,9 +586,11 @@ app.get("/wallet-events/:wallet", rateLimit, async (req, res) => {
     const cached = getCached(cacheKey);
     if (cached) return res.json(cached);
 
-    const conditions = ["topics[1] IN ($1, $2)", "data->>'payer' = $3"];
-    const params = [DEPOSIT_EVT, WITHDRAW_EVT, wallet];
-    let paramIdx = 4;
+    // TSHOTExchange deployed 2026-03-09 — hard floor so TimescaleDB only scans recent chunks
+    const TSHOT_LAUNCH = "2026-03-09T00:00:00Z";
+    const conditions = ["topics[1] IN ($1, $2)", "data->>'payer' = $3", "block_timestamp >= $4"];
+    const params = [DEPOSIT_EVT, WITHDRAW_EVT, wallet, TSHOT_LAUNCH];
+    let paramIdx = 5;
 
     // Optional type filter
     if (req.query.type === "deposit") {
