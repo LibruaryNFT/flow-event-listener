@@ -41,7 +41,7 @@ const JITTER_MS = 250;
 let mongo, raw, processed, wallet;
 async function mongoEnsure() {
   if (!mongo) mongo = new MongoClient(MONGODB_URI);
-  if (!mongo.topology || !mongo.topology.isConnected()) await mongo.connect();
+  try { await mongo.db("admin").command({ ping: 1 }); } catch { await mongo.connect(); }
   const db = mongo.db(DB);
   raw = db.collection(RAW_COL);
   processed = db.collection(PROCESSED_COL);
@@ -145,13 +145,14 @@ http
     if (req.url === "/health" && (req.method === "GET" || req.method === "HEAD")) {
       let mongoStatus = "unknown";
       try {
-        if (mongo && mongo.topology && mongo.topology.isConnected()) {
+        if (mongo) {
+          await mongo.db("admin").command({ ping: 1 });
           mongoStatus = "connected";
         } else {
           mongoStatus = "disconnected";
         }
       } catch {
-        mongoStatus = "error";
+        mongoStatus = "disconnected";
       }
       const body = JSON.stringify({
         status: mongoStatus === "connected" ? "healthy" : "degraded",
