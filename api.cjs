@@ -649,7 +649,7 @@ app.get("/wallet-events/:wallet", rateLimit, async (req, res) => {
 // GET /wallet-stats — aggregated wallet stats (leaderboard)
 // GET /wallet-stats/:wallet — stats for a specific wallet
 // Reads from tshot_wallet_stats materialized view (refreshed by flow-refresh.sh)
-app.get("/wallet-stats/:wallet?", rateLimit, async (req, res) => {
+app.get("/wallet-stats{/:wallet}", rateLimit, async (req, res) => {
   try {
     const wallet = req.params.wallet || req.query.wallet;
     const cacheKey = `wallet-stats:${req.originalUrl}`;
